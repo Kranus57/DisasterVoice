@@ -1,11 +1,23 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import Dashboard from './components/Dashboard.jsx';
 
 function App() {
+  const [theme, setTheme] = useState('dark');
+
+  // Sync theme class to body for document-level CSS variable resolution
+  useEffect(() => {
+    const bodyClass = document.body.classList;
+    if (theme === 'light') {
+      bodyClass.add('light-theme');
+    } else {
+      bodyClass.remove('light-theme');
+    }
+  }, [theme]);
+
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className={`min-h-screen flex flex-col transition-colors duration-300 ${theme === 'light' ? 'light-theme' : ''}`}>
       {/* Global Command Header */}
-      <header className="border-b border-slate-900/60 bg-slate-950/70 backdrop-blur sticky top-0 z-50">
+      <header className="border-b border-slate-900/60 bg-slate-950/70 backdrop-blur sticky top-0 z-50 transition-colors duration-300">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center space-x-3">
             <div className="p-2 bg-rose-500/10 rounded-lg border border-rose-500/20 text-rose-500 text-lg">
@@ -22,6 +34,15 @@ function App() {
             </div>
           </div>
           <div className="flex items-center space-x-6">
+            {/* Theme Toggle Button */}
+            <button
+              onClick={() => setTheme(prev => prev === 'dark' ? 'light' : 'dark')}
+              className="px-3 py-1.5 rounded-lg text-xs font-bold border border-slate-800 bg-slate-900 text-slate-400 hover:text-white cursor-pointer transition flex items-center space-x-1"
+              title="Toggle color theme"
+            >
+              <span>{theme === 'dark' ? '☀️ LIGHT MODE' : '🌙 DARK MODE'}</span>
+            </button>
+
             <div className="hidden md:flex items-center space-x-4 text-xs text-slate-400">
               <div>
                 <span className="text-slate-500">Node JS Port:</span> <span className="font-mono text-rose-400 font-medium">5000</span>
@@ -44,11 +65,11 @@ function App() {
 
       {/* Main Layout Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6 lg:p-8 flex flex-col justify-start">
-        <Dashboard />
+        <Dashboard theme={theme} />
       </main>
 
       {/* Global Footer */}
-      <footer className="border-t border-slate-900/60 bg-slate-950/20 py-4 text-center text-xs text-slate-500">
+      <footer className="border-t border-slate-900/60 bg-slate-950/20 py-4 text-center text-xs text-slate-500 transition-colors duration-300">
         <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between">
           <p>© 2026 DisasterVoice India. Expert Full-Stack Disaster Response Platform.</p>
           <p className="mt-1 sm:mt-0 font-mono text-[10px] text-slate-600">Latencies calculated in real-time. Twilio & LLM channels simulated if keys absent.</p>

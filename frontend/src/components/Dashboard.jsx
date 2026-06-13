@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+
 import { 
   Play, 
   RefreshCw, 
@@ -23,33 +26,57 @@ const socket = io(
     : window.location.origin
 );
 
-const PRESETS = [
+const INITIAL_PRESETS = [
   {
     name: "Cyclone Dana Alert",
     title: "Severe Cyclone Dana Approaching Coastal Odisha",
     severity: "CRITICAL",
-    description: "Cyclone warning issued for coastal Odisha and West Bengal. Landfall expected within 18 hours with wind speeds reaching 150 km/h. Coastal populations near Puri and Paradip must evacuate immediately."
+    description: "Cyclone warning issued for coastal Odisha and West Bengal. Landfall expected within 18 hours with wind speeds reaching 150 km/h. Coastal populations near Puri and Paradip must evacuate immediately.",
+    center: [19.2, 87.8],
+    zoom: 6,
+    trackPoints: [
+      [17.0, 89.5],
+      [18.0, 88.8],
+      [19.2, 87.8],
+      [20.1, 86.8], // Landfall Puri/Paradip
+      [21.0, 85.5]
+    ]
   },
   {
     name: "Sundarbans Flood Warning",
     title: "Flash Flood Alert for Sundarbans Delta",
     severity: "WARNING",
-    description: "Severe flooding inundation reported across Sundarbans and Digha due to torrential rains and tidal surges. Low-lying mud embankments breached. Please move to cement cyclone shelters."
+    description: "Severe flooding inundation reported across Sundarbans and Digha due to torrential rains and tidal surges. Low-lying mud embankments breached. Please move to cement cyclone shelters.",
+    center: [21.7, 88.5],
+    zoom: 7,
+    trackPoints: [
+      [20.0, 88.0],
+      [21.0, 88.5],
+      [21.7, 88.5]
+    ]
   },
   {
     name: "Tamil Nadu Swell Waves",
     title: "Tidal Wave Surge Warning - Nagapattinam",
     severity: "ADVISORY",
-    description: "High swell wave advisory issued for Tamil Nadu coast. Sea waves likely to exceed 4 meters. Fishermen warned against going out. Beachside residents near Nagapattinam should relocate inland."
+    description: "High swell wave advisory issued for Tamil Nadu coast. Sea waves likely to exceed 4 meters. Fishermen warned against going out. Beachside residents near Nagapattinam should relocate inland.",
+    center: [10.8, 79.9],
+    zoom: 7,
+    trackPoints: [
+      [9.0, 81.5],
+      [10.0, 80.8],
+      [10.8, 79.9]
+    ]
   }
 ];
 
-export default function Dashboard() {
+export default function Dashboard({ theme }) {
+  const [presets, setPresets] = useState(INITIAL_PRESETS);
   const [users, setUsers] = useState([]);
   const [logs, setLogs] = useState([]);
   const [activePreset, setActivePreset] = useState(0);
-  const [customAlert, setCustomAlert] = useState(PRESETS[0].description);
-  const [severity, setSeverity] = useState(PRESETS[0].severity);
+  const [customAlert, setCustomAlert] = useState(INITIAL_PRESETS[0].description);
+  const [severity, setSeverity] = useState(INITIAL_PRESETS[0].severity);
   
   // Stopwatch & Pipeline Latency states
   const [pipelineState, setPipelineState] = useState('idle'); // idle, running, completed
@@ -77,11 +104,206 @@ export default function Dashboard() {
   const logsEndRef = useRef(null);
   const stopwatchInterval = useRef(null);
 
+  // Leaflet map states and refs
+  const mapContainerRef = useRef(null);
+  const mapInstanceRef = useRef(null);
+  const tileLayerRef = useRef(null);
+  const markersRef = useRef({});
+  const stormOverlayRef = useRef(null);
+  const disasterMarkerRef = useRef(null);
+  const trackLineRef = useRef(null);
+  const operatorMarkerRef = useRef(null);
+  const [isLocating, setIsLocating] = useState(false);
+  const [operatorLocation, setOperatorLocation] = useState(null);
+  
+  // Add User from Map modal state
+  const [showAddUserModal, setShowAddUserModal] = useState(false);
+  const [clickedCoords, setClickedCoords] = useState(null);
+  const [newUserName, setNewUserName] = useState('');
+  const [newUserPhone, setNewUserPhone] = useState('');
+  const [newUserLang, setNewUserLang] = useState('Hindi');
+  const [newUserLocName, setNewUserLocName] = useState('');
+
+  // Add Custom Disaster states
+  const [showAddDisasterModal, setShowAddDisasterModal] = useState(false);
+  const [disasterName, setDisasterName] = useState('');
+  const [disasterTitle, setDisasterTitle] = useState('');
+  const [disasterSeverity, setDisasterSeverity] = useState('CRITICAL');
+  const [disasterDesc, setDisasterDesc] = useState('');
+  const [disasterLat, setDisasterLat] = useState('19.0');
+  const [disasterLng, setDisasterLng] = useState('85.0');
+  const [isPickingLocation, setIsPickingLocation] = useState(false);
+  const isPickingLocationRef = useRef(false);
+
+  useEffect(() => {
+    isPickingLocationRef.current = isPickingLocation;
+  }, [isPickingLocation]);
+
+
+  const getMarkerColor = (status) => {
+    switch (status) {
+      case 'Safe': return '#10b981';      // Emerald-500
+      case 'Unsafe': return '#ef4444';    // Red-500
+      case 'Delivered': return '#3b82f6'; // Blue-500
+      case 'SMS Fallback': return '#f97316'; // Orange-500
+      case 'IVR Dispatch': return '#a855f7'; // Purple-500
+      default: return '#64748b';          // Slate-500
+    }
+  };
+
+  const locateOperator = () => {
+    if (!navigator.geolocation) {
+      alert("Geolocation is not supported by your browser");
+      return;
+    }
+
+    setIsLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const { latitude, longitude } = position.coords;
+        setOperatorLocation({ lat: latitude, lng: longitude });
+        setIsLocating(false);
+
+        if (mapInstanceRef.current) {
+          const map = mapInstanceRef.current;
+          map.setView([latitude, longitude], 8); // Zoom closer
+
+          // Draw operator marker
+          const operatorIconHtml = `
+            <div class="relative flex items-center justify-center">
+              <span class="absolute inline-flex h-10 w-10 rounded-full bg-blue-500/30 opacity-40 animate-ping"></span>
+              <span class="relative inline-flex rounded-full h-5 w-5 bg-blue-500 border-2 border-white shadow-lg flex items-center justify-center">
+                <span class="h-2 w-2 rounded-full bg-white"></span>
+              </span>
+            </div>
+          `;
+
+          const opIcon = L.divIcon({
+            html: operatorIconHtml,
+            className: 'operator-leaflet-marker',
+            iconSize: [30, 30],
+            iconAnchor: [15, 15]
+          });
+
+          if (operatorMarkerRef.current) {
+            operatorMarkerRef.current.setLatLng([latitude, longitude]);
+          } else {
+            const opMarker = L.marker([latitude, longitude], { icon: opIcon })
+              .addTo(map)
+              .bindPopup(`
+                <div class="text-xs text-slate-200 bg-slate-950 p-2 rounded border border-slate-800 font-sans min-w-[150px]">
+                  <h4 class="font-bold text-white text-sm">Command Center (You)</h4>
+                  <p class="text-[10px] text-slate-400 font-mono mt-0.5">${latitude.toFixed(6)}, ${longitude.toFixed(6)}</p>
+                  <p class="text-[10px] text-blue-400 mt-1">Acquired via GPS</p>
+                </div>
+              `);
+            operatorMarkerRef.current = opMarker;
+          }
+        }
+      },
+      (error) => {
+        console.error("Geolocation error:", error);
+        setIsLocating(false);
+        alert(`Failed to acquire GPS location: ${error.message}`);
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  };
+
+  const handleAddNewUser = async (e) => {
+    e.preventDefault();
+    if (!newUserName || !newUserPhone || !newUserLang || !clickedCoords) return;
+
+    try {
+      const response = await fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newUserName,
+          phone: newUserPhone,
+          language: newUserLang,
+          location: newUserLocName || `Coordinates: ${clickedCoords.lat}, ${clickedCoords.lng}`,
+          lat: clickedCoords.lat,
+          lng: clickedCoords.lng
+        })
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        setNewUserName('');
+        setNewUserPhone('');
+        setNewUserLang('Hindi');
+        setNewUserLocName('');
+        setShowAddUserModal(false);
+        setClickedCoords(null);
+        
+        setLogs(prev => [...prev, {
+          timestamp: new Date().toLocaleTimeString(),
+          agent: 'System Coordinator',
+          message: `Resident "${data.user.name}" registered successfully at GPS coordinates (${data.user.lat}, ${data.user.lng}).`,
+          type: 'success'
+        }]);
+      }
+    } catch (err) {
+      console.error("Failed to add user:", err);
+      alert("Failed to add resident. Check server connection.");
+    }
+  };
+
+  const handleAddNewDisaster = (e) => {
+    e.preventDefault();
+    if (!disasterName || !disasterTitle || !disasterDesc || !disasterLat || !disasterLng) return;
+
+    const latNum = Number(disasterLat);
+    const lngNum = Number(disasterLng);
+
+    const newTrackPoints = [
+      [latNum - 1.5, lngNum + 1.2],
+      [latNum - 0.7, lngNum + 0.6],
+      [latNum, lngNum],
+      [latNum + 0.8, lngNum - 0.7],
+      [latNum + 1.6, lngNum - 1.5]
+    ];
+
+    const newPreset = {
+      name: disasterName,
+      title: disasterTitle,
+      severity: disasterSeverity,
+      description: disasterDesc,
+      center: [latNum, lngNum],
+      zoom: 6,
+      trackPoints: newTrackPoints
+    };
+
+    setPresets(prev => {
+      const updated = [...prev, newPreset];
+      setActivePreset(updated.length - 1);
+      setCustomAlert(newPreset.description);
+      setSeverity(newPreset.severity);
+      return updated;
+    });
+
+    setShowAddDisasterModal(false);
+    setDisasterName('');
+    setDisasterTitle('');
+    setDisasterSeverity('CRITICAL');
+    setDisasterDesc('');
+    setDisasterLat('19.0');
+    setDisasterLng('85.0');
+
+    setLogs(prev => [...prev, {
+      timestamp: new Date().toLocaleTimeString(),
+      agent: 'System Coordinator',
+      message: `Manually added new disaster: "${disasterTitle}" centered at (${latNum}, ${lngNum}).`,
+      type: 'success'
+    }]);
+  };
+
   // Parse preset choices
   const applyPreset = (index) => {
     setActivePreset(index);
-    setCustomAlert(PRESETS[index].description);
-    setSeverity(PRESETS[index].severity);
+    setCustomAlert(presets[index].description);
+    setSeverity(presets[index].severity);
   };
 
   // Auto scroll logs
@@ -173,6 +395,288 @@ export default function Dashboard() {
     };
   }, []);
 
+  // Initialize Leaflet Map
+  useEffect(() => {
+    if (!mapContainerRef.current || mapInstanceRef.current) return;
+
+    // Center of the Bay of Bengal coastline, fitting Odisha, Bengal, and Tamil Nadu
+    const map = L.map(mapContainerRef.current, {
+      center: INITIAL_PRESETS[0].center,
+      zoom: INITIAL_PRESETS[0].zoom,
+      zoomControl: true,
+      attributionControl: false
+    });
+
+    // Dynamic tile layer initialized with current theme
+    const initialTileUrl = theme === 'dark'
+      ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+      : 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+
+    const tiles = L.tileLayer(initialTileUrl, {
+      maxZoom: 19
+    }).addTo(map);
+    tileLayerRef.current = tiles;
+
+    mapInstanceRef.current = map;
+
+    // Draw the storm overlay (impact range circle)
+    const stormCircle = L.circle(INITIAL_PRESETS[0].center, {
+      color: '#ef4444',
+      fillColor: '#ef4444',
+      fillOpacity: 0.12,
+      radius: 200000, // 200km radius
+      weight: 1.5,
+      dashArray: '5, 5'
+    }).addTo(map);
+
+    // Pulse animation for storm overlay
+    let goingUp = true;
+    const pulseInterval = setInterval(() => {
+      if (!mapInstanceRef.current) return;
+      const currentOpacity = stormCircle.options.fillOpacity;
+      let newOpacity = goingUp ? currentOpacity + 0.005 : currentOpacity - 0.005;
+      if (newOpacity >= 0.20) {
+        newOpacity = 0.20;
+        goingUp = false;
+      } else if (newOpacity <= 0.08) {
+        newOpacity = 0.08;
+        goingUp = true;
+      }
+      stormCircle.setStyle({ fillOpacity: newOpacity });
+    }, 150);
+
+    stormOverlayRef.current = stormCircle;
+
+    // Draw Cyclone Eye rotating marker
+    const stormIconHtml = `
+      <div class="animate-spin" style="animation-duration: 20s">
+        <svg viewBox="0 0 100 100" class="w-12 h-12 text-rose-500 opacity-80 filter drop-shadow-[0_0_8px_rgba(244,63,94,0.6)]">
+          <circle cx="50" cy="50" r="10" fill="currentColor" />
+          <path fill="currentColor" d="M50 30c-11 0-20 9-20 20s9 20 20 20 20-9 20-20-9-20-20-20zm0 30c-5.5 0-10-4.5-10-10s4.5-10 10-10 10 4.5 10 10-4.5 10-10 10z" opacity="0.5"/>
+          <path fill="currentColor" d="M50 0C22.4 0 0 22.4 0 50c0 10.1 3 19.5 8.2 27.4l12.4-12.4C17.3 59.5 15 50 15 50c0-19.3 15.7-35 35-35h15l15-15H50z" />
+          <path fill="currentColor" d="M50 100c27.6 0 50-22.4 50-50 0-10.1-3-19.5-8.2-27.4L89.4 35c3.3 5.5 5.6 15 5.6 15 0 19.3-15.7 35-35 35H45L30 100h20z" />
+        </svg>
+      </div>
+    `;
+
+    const stormEyeIcon = L.divIcon({
+      html: stormIconHtml,
+      className: 'storm-eye-marker',
+      iconSize: [48, 48],
+      iconAnchor: [24, 24]
+    });
+
+    const disasterMarker = L.marker(INITIAL_PRESETS[0].center, { icon: stormEyeIcon })
+      .addTo(map)
+      .bindPopup(`
+        <div class="text-xs text-rose-200 bg-slate-950 p-2.5 rounded-lg border border-rose-900/40 font-sans">
+          <h4 class="font-bold text-rose-500 text-sm">Cyclone Dana Eye</h4>
+          <p class="text-[10px] text-slate-400">Current Intensity: Category 2</p>
+          <p class="text-[10px] text-slate-400">Est. Landfall: 12 Hours</p>
+          <p class="text-[10px] text-rose-450 font-bold">Speed: 150 km/h</p>
+        </div>
+      `);
+    disasterMarkerRef.current = disasterMarker;
+
+    // Forecast Track Polyline
+    const trackLine = L.polyline(INITIAL_PRESETS[0].trackPoints, {
+      color: '#ef4444',
+      weight: 2,
+      opacity: 0.6,
+      dashArray: '6, 6'
+    }).addTo(map);
+    trackLineRef.current = trackLine;
+
+    // Map click handler to open the registration dialog or pick coordinates for custom disaster
+    map.on('click', (e) => {
+      const { lat, lng } = e.latlng;
+      if (isPickingLocationRef.current) {
+        setDisasterLat(lat.toFixed(6));
+        setDisasterLng(lng.toFixed(6));
+        setIsPickingLocation(false);
+        setShowAddDisasterModal(true);
+      } else {
+        setClickedCoords({ lat: Number(lat.toFixed(6)), lng: Number(lng.toFixed(6)) });
+        setNewUserLocName(`Coastal Region (${lat.toFixed(4)}, ${lng.toFixed(4)})`);
+        setShowAddUserModal(true);
+      }
+    });
+
+    // Invalidate size to guarantee rendering
+    setTimeout(() => {
+      map.invalidateSize();
+    }, 250);
+
+    return () => {
+      clearInterval(pulseInterval);
+      map.remove();
+      mapInstanceRef.current = null;
+    };
+  }, []);
+
+  // Update map tile layer dynamically when theme changes
+  useEffect(() => {
+    if (!mapInstanceRef.current || !tileLayerRef.current) return;
+    const map = mapInstanceRef.current;
+    
+    // Remove old tiles
+    tileLayerRef.current.remove();
+
+    const newUrl = theme === 'dark'
+      ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+      : 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+
+    const newTiles = L.tileLayer(newUrl, {
+      maxZoom: 19
+    }).addTo(map);
+    tileLayerRef.current = newTiles;
+  }, [theme]);
+
+
+  // Update map center and overlays when active preset changes
+  useEffect(() => {
+    if (!mapInstanceRef.current || !presets[activePreset]) return;
+    const map = mapInstanceRef.current;
+    const currentPreset = presets[activePreset];
+
+    // Fly to new location
+    map.flyTo(currentPreset.center, currentPreset.zoom || 6, {
+      animate: true,
+      duration: 1.5
+    });
+
+    // Update storm range circle
+    if (stormOverlayRef.current) {
+      stormOverlayRef.current.setLatLng(currentPreset.center);
+    }
+
+    // Update disaster center marker popup content & position
+    if (disasterMarkerRef.current) {
+      disasterMarkerRef.current.setLatLng(currentPreset.center);
+      disasterMarkerRef.current.setPopupContent(`
+        <div class="text-xs text-rose-200 bg-slate-950 p-2.5 rounded-lg border border-rose-900/40 font-sans">
+          <h4 class="font-bold text-rose-500 text-sm">${currentPreset.title}</h4>
+          <p class="text-[10px] text-slate-400">Severity: ${currentPreset.severity}</p>
+          <p class="text-[10px] text-slate-400">Location: ${currentPreset.center[0].toFixed(4)}, ${currentPreset.center[1].toFixed(4)}</p>
+        </div>
+      `);
+    }
+
+    // Update track line polyline geometry
+    if (trackLineRef.current && currentPreset.trackPoints) {
+      trackLineRef.current.setLatLngs(currentPreset.trackPoints);
+    }
+  }, [activePreset, presets]);
+
+
+  // Update/Render Resident Markers on users list change
+  useEffect(() => {
+    if (!mapInstanceRef.current) return;
+    const map = mapInstanceRef.current;
+
+    // Remove obsolete markers
+    Object.keys(markersRef.current).forEach(userId => {
+      if (!users.some(u => u.id === userId)) {
+        markersRef.current[userId].remove();
+        delete markersRef.current[userId];
+      }
+    });
+
+    // Draw/Update markers
+    users.forEach(user => {
+      if (user.lat === undefined || user.lng === undefined) return;
+
+      const markerColor = getMarkerColor(user.status);
+      const iconHtml = `
+        <div class="relative flex items-center justify-center">
+          <span class="absolute inline-flex h-8 w-8 rounded-full opacity-35 animate-ping" style="background-color: ${markerColor}"></span>
+          <span class="relative inline-flex rounded-full h-5.5 w-5.5 border border-white shadow-lg flex items-center justify-center text-[9px] font-extrabold text-white" style="background-color: ${markerColor}">
+            ${user.name.charAt(0)}
+          </span>
+        </div>
+      `;
+
+      const customIcon = L.divIcon({
+        html: iconHtml,
+        className: 'custom-leaflet-marker',
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
+      });
+
+      const popupContent = document.createElement('div');
+      popupContent.className = 'text-xs text-slate-200 bg-slate-950 p-2.5 rounded-lg border border-slate-800 space-y-1.5 min-w-[200px] font-sans';
+      
+      let badgeHtml = `<span class="px-1.5 py-0.5 rounded font-mono text-[9px] uppercase font-bold" style="background-color: ${markerColor}33; color: ${markerColor}; border: 1px solid ${markerColor}55">${user.status}</span>`;
+      
+      popupContent.innerHTML = `
+        <div class="flex justify-between items-start">
+          <h4 class="font-bold text-white text-sm leading-tight">${user.name}</h4>
+          ${badgeHtml}
+        </div>
+        <p class="text-[10px] text-slate-400 font-mono">${user.phone}</p>
+        <div class="border-t border-slate-800/60 my-1"></div>
+        <div class="flex justify-between text-[11px]">
+          <span class="text-slate-500 font-semibold">Lang:</span>
+          <span class="font-semibold text-slate-300">${user.language}</span>
+        </div>
+        <div class="flex justify-between text-[11px]">
+          <span class="text-slate-500 font-semibold">Channel:</span>
+          <span class="font-semibold text-slate-300">${user.channel}</span>
+        </div>
+        <div class="flex justify-between text-[11px]">
+          <span class="text-slate-500 font-semibold">Location:</span>
+          <span class="text-slate-300 text-right max-w-[130px] truncate" title="${user.location}">${user.location}</span>
+        </div>
+        <div class="pt-1.5 flex flex-col gap-1.5">
+          ${(user.status === 'Pending' || user.status === 'Delivered' || user.status === 'SMS Fallback' || user.status === 'IVR Dispatch') ? `
+            <div class="flex gap-1.5">
+              <button class="safe-btn flex-1 py-1 rounded bg-emerald-500/10 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold transition">
+                ✔️ Safe
+              </button>
+              <button class="help-btn flex-1 py-1 rounded bg-rose-500/10 hover:bg-rose-500/25 border border-rose-500/30 text-rose-400 text-[10px] font-bold transition">
+                ⚠️ Help
+              </button>
+            </div>
+          ` : ''}
+          ${user.status === 'IVR Dispatch' ? `
+            <button class="stream-btn w-full py-1.5 rounded bg-purple-500/20 hover:bg-purple-500/35 border border-purple-500/30 text-purple-400 text-[10px] font-bold flex items-center justify-center gap-1 transition">
+              📞 Stream Call
+            </button>
+          ` : ''}
+        </div>
+      `;
+
+      popupContent.querySelector('.safe-btn')?.addEventListener('click', () => {
+        sendQuickFeedback(user.phone, '1');
+      });
+      popupContent.querySelector('.help-btn')?.addEventListener('click', () => {
+        sendQuickFeedback(user.phone, '2');
+      });
+      popupContent.querySelector('.stream-btn')?.addEventListener('click', () => {
+        playIVRVoice(user);
+      });
+
+      if (markersRef.current[user.id]) {
+        const marker = markersRef.current[user.id];
+        marker.setLatLng([user.lat, user.lng]);
+        marker.setIcon(customIcon);
+        marker.setPopupContent(popupContent);
+      } else {
+        const marker = L.marker([user.lat, user.lng], { icon: customIcon })
+          .addTo(map)
+          .bindPopup(popupContent);
+        
+        marker.on('click', () => {
+          setSelectedMapUser(user);
+        });
+
+        markersRef.current[user.id] = marker;
+      }
+    });
+
+  }, [users]);
+
+
   // Trigger Simulated Alert
   const triggerAlertSim = async () => {
     try {
@@ -189,7 +693,7 @@ export default function Dashboard() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          title: PRESETS[activePreset].title,
+          title: presets[activePreset].title,
           description: customAlert,
           severity: severity,
           languages: selectedLanguages,
@@ -435,12 +939,12 @@ export default function Dashboard() {
           </div>
 
           {/* Preset Chips */}
-          <div className="flex space-x-2 mb-4 bg-slate-950/60 p-1 rounded-xl border border-slate-900">
-            {PRESETS.map((p, idx) => (
+          <div className="flex flex-wrap gap-2 mb-4 bg-slate-950/60 p-2 rounded-xl border border-slate-900 items-center">
+            {presets.map((p, idx) => (
               <button
                 key={idx}
                 onClick={() => applyPreset(idx)}
-                className={`flex-1 text-center py-2 px-1 text-xs font-semibold rounded-lg transition-all ${
+                className={`py-1.5 px-3 text-xs font-semibold rounded-lg transition-all ${
                   activePreset === idx 
                     ? 'bg-rose-500 text-white shadow-lg shadow-rose-500/25' 
                     : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/50'
@@ -449,6 +953,12 @@ export default function Dashboard() {
                 {p.name}
               </button>
             ))}
+            <button
+              onClick={() => setShowAddDisasterModal(true)}
+              className="py-1 px-2.5 text-[10px] font-bold rounded-lg transition-all text-rose-400 hover:text-white bg-rose-500/10 hover:bg-rose-500/25 border border-rose-500/20 hover:border-rose-500/50"
+            >
+              + ADD DISASTER
+            </button>
           </div>
 
           {/* Active Preset Input Panel */}
@@ -631,158 +1141,27 @@ export default function Dashboard() {
       <div className="lg:col-span-7 flex flex-col space-y-6">
         
         {/* Coastal Mapping Status Panel */}
-        <div className="glass-panel rounded-2xl p-5 shadow-2xl relative overflow-hidden">
-          <div className="flex items-center space-x-2 mb-4">
-            <Map className="w-4 h-4 text-rose-500" />
-            <h2 className="text-base font-bold tracking-wide text-white">GEOSPATIAL STORM INUNDATION RADAR</h2>
+        <div className="glass-panel rounded-2xl p-5 shadow-2xl relative overflow-hidden flex flex-col">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center space-x-2">
+              <Map className="w-4 h-4 text-rose-500" />
+              <h2 className="text-base font-bold tracking-wide text-white">GEOSPATIAL STORM INUNDATION RADAR</h2>
+            </div>
+            <button
+              onClick={locateOperator}
+              disabled={isLocating}
+              className="text-xs font-semibold text-slate-400 hover:text-white flex items-center space-x-1 py-1 px-2.5 rounded-lg bg-slate-900 border border-slate-800 hover:bg-slate-800 transition"
+            >
+              <span>{isLocating ? 'LOCATING GPS...' : 'LOCATE COMMAND CENTER'}</span>
+            </button>
           </div>
 
-          <div className="relative bg-slate-950/80 rounded-xl border border-slate-900 p-4 h-[250px] overflow-hidden flex items-center justify-center">
-            
-            {/* SVG Visual Map representation */}
-            <svg viewBox="0 0 450 250" className="w-full h-full opacity-85 select-none z-10">
-              <defs>
-                <linearGradient id="radarSweep" x1="0%" y1="0%" x2="100%" y2="0%">
-                  <stop offset="0%" stopColor="rgba(59, 130, 246, 0)" />
-                  <stop offset="100%" stopColor="rgba(59, 130, 246, 0.25)" />
-                </linearGradient>
-              </defs>
+          <div className="relative bg-slate-950/80 rounded-xl border border-slate-900 overflow-hidden flex items-center justify-center min-h-[380px]">
+            {/* Leaflet map div */}
+            <div ref={mapContainerRef} className="absolute inset-0 w-full h-full z-10"></div>
 
-              {/* Concentric radar grid circles */}
-              <circle cx="225" cy="125" r="50" fill="none" stroke="rgba(59, 130, 246, 0.08)" strokeWidth="1" />
-              <circle cx="225" cy="125" r="100" fill="none" stroke="rgba(59, 130, 246, 0.08)" strokeWidth="1" />
-              <circle cx="225" cy="125" r="150" fill="none" stroke="rgba(59, 130, 246, 0.05)" strokeWidth="1" />
-              <circle cx="225" cy="125" r="200" fill="none" stroke="rgba(59, 130, 246, 0.03)" strokeWidth="1" />
-              
-              {/* Radiating lines */}
-              <line x1="25" y1="125" x2="425" y2="125" stroke="rgba(59, 130, 246, 0.04)" strokeWidth="1" />
-              <line x1="225" y1="25" x2="225" y2="225" stroke="rgba(59, 130, 246, 0.04)" strokeWidth="1" />
-
-              {/* Radar sweep beam */}
-              <g className="radar-sweep-beam" style={{ transformOrigin: '225px 125px' }}>
-                <polygon points="225,125 425,110 425,140" fill="url(#radarSweep)" />
-                <line x1="225" y1="125" x2="425" y2="125" stroke="rgba(59, 130, 246, 0.3)" strokeWidth="1.5" />
-              </g>
-
-              {/* Landmass outline */}
-              <path 
-                d="M50 0 C70 50, 110 90, 180 120 C220 135, 270 145, 340 180 C390 205, 420 220, 450 250 L450 0 Z" 
-                fill="#111827" 
-                stroke="#1f2937" 
-                strokeWidth="1.5" 
-              />
-              
-              {/* Coastline Shoreline wave effect */}
-              <path 
-                d="M50 0 C70 50, 110 90, 180 120 C220 135, 270 145, 340 180 C390 205, 420 220, 450 250" 
-                fill="none" 
-                stroke="#1e3a8a" 
-                strokeWidth="3" 
-                strokeDasharray="4 2" 
-                className="opacity-50"
-              />
-
-              {/* Storm vortex overlay */}
-              <g className="origin-center animate-spin" style={{ transformOrigin: '320px 100px', animationDuration: '20s' }}>
-                {/* Typhoon spiral lines */}
-                <circle cx="320" cy="100" r="45" fill="none" stroke="rgba(244, 63, 94, 0.15)" strokeWidth="6" strokeDasharray="20 10" />
-                <circle cx="320" cy="100" r="30" fill="none" stroke="rgba(244, 63, 94, 0.2)" strokeWidth="4" strokeDasharray="15 8" />
-                <circle cx="320" cy="100" r="15" fill="rgba(244, 63, 94, 0.1)" stroke="rgba(244, 63, 94, 0.4)" strokeWidth="2" />
-              </g>
-
-              {/* Storm projection arrow */}
-              <path 
-                d="M 320 100 Q 250 120, 190 115" 
-                fill="none" 
-                stroke="#ef4444" 
-                strokeWidth="1.5" 
-                strokeDasharray="5 3" 
-              />
-              <text x="310" y="80" fill="#f43f5e" fontSize="9" fontWeight="bold">Storm Core (Dana)</text>
-              <text x="140" y="100" fill="#64748b" fontSize="8" transform="rotate(20 140 100)">Bay of Bengal</text>
-
-              {/* Coordinates mappings for mock users */}
-              {/* User 1: Puri (19.8134, 85.8312) -> Mapping to X=170 Y=120 */}
-              {/* User 2: Nagapattinam (10.7672, 79.8444) -> Mapping to X=60 Y=210 */}
-              {/* User 3: Digha (21.6266, 87.5074) -> Mapping to X=280 Y=75 */}
-              {/* User 4: Paradip (20.2606, 86.6666) -> Mapping to X=205 Y=105 */}
-              {/* User 5: Sundarbans (21.9497, 89.1833) -> Mapping to X=330 Y=60 */}
-              
-              {users.map(u => {
-                let x = 150, y = 150;
-                if (u.id === 'user_1') { x = 160; y = 115; }
-                else if (u.id === 'user_2') { x = 70; y = 205; }
-                else if (u.id === 'user_3') { x = 280; y = 75; }
-                else if (u.id === 'user_4') { x = 205; y = 100; }
-                else if (u.id === 'user_5') { x = 320; y = 55; }
-
-                let markerColor = '#94a3b8'; // pending grey
-                let glowClass = '';
-                if (u.status === 'Safe') { markerColor = '#22c55e'; glowClass = 'glow-green-pulse'; }
-                else if (u.status === 'Unsafe') { markerColor = '#ef4444'; glowClass = 'glow-red-pulse'; }
-                else if (u.status === 'SMS Fallback') { markerColor = '#f97316'; glowClass = 'glow-orange-pulse'; }
-                else if (u.status === 'IVR Dispatch') { markerColor = '#a855f7'; }
-                else if (u.status === 'Delivered') { markerColor = '#3b82f6'; glowClass = 'glow-blue-pulse'; }
-
-                return (
-                  <g 
-                    key={u.id} 
-                    className="cursor-pointer group"
-                    onClick={() => setSelectedMapUser(u)}
-                  >
-                    {/* Pulsing glow background */}
-                    <circle cx={x} cy={y} r="8" className={`${glowClass} group-hover:scale-125 transition-transform`} fill={markerColor} opacity="0.3" />
-                    {/* Core node */}
-                    <circle cx={x} cy={y} r="4" fill={markerColor} stroke="#ffffff" strokeWidth="1" className="group-hover:stroke-rose-400 transition" />
-                    {/* Label */}
-                    <text x={x + 7} y={y + 3} fill="#e2e8f0" fontSize="8" fontWeight="600" className="drop-shadow-md group-hover:fill-rose-350 transition">
-                      {u.name.split(' ')[0]}
-                    </text>
-                  </g>
-                );
-              })}
-            </svg>
-
-            {/* Clickable Map Detail Profile Popover */}
-            {selectedMapUser && (
-              <div className="absolute top-2 right-2 bg-slate-900/95 border border-slate-800/80 rounded-xl p-3 shadow-xl z-30 max-w-[200px] text-[11px] space-y-1.5 backdrop-blur-sm">
-                <div className="flex justify-between items-start">
-                  <h4 className="font-bold text-white leading-tight">{selectedMapUser.name}</h4>
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); setSelectedMapUser(null); }}
-                    className="text-slate-500 hover:text-slate-300 ml-2 text-xs"
-                  >
-                    ✕
-                  </button>
-                </div>
-                <p className="text-slate-400 font-mono text-[9px]">{selectedMapUser.phone}</p>
-                <div className="border-t border-slate-800/60 my-1"></div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Lang:</span>
-                  <span className="font-semibold text-slate-350">{selectedMapUser.language}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Location:</span>
-                  <span className="text-slate-350 text-right text-[10px] break-all leading-tight">{selectedMapUser.location.split(',')[0]}</span>
-                </div>
-                <div className="flex justify-between items-center pt-0.5">
-                  <span className="text-slate-500">Status:</span>
-                  {getStatusBadge(selectedMapUser.status)}
-                </div>
-                
-                {selectedMapUser.status === 'IVR Dispatch' && (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); playIVRVoice(selectedMapUser); }}
-                    className="w-full mt-1.5 py-1 px-2 rounded bg-purple-500/20 hover:bg-purple-500/35 text-purple-400 font-semibold text-[10px] flex items-center justify-center space-x-1 border border-purple-500/30 transition animate-pulse"
-                  >
-                    <span>Play IVR Synthesis</span>
-                  </button>
-                )}
-              </div>
-            )}
-            
-            {/* Legend Overlay */}
-            <div className="absolute bottom-2 right-2 bg-slate-900/95 border border-slate-800/80 rounded-lg p-2 flex flex-col space-y-1 text-[9px] text-slate-400 font-semibold z-20">
+            {/* Custom Legend Overlay inside Map Panel */}
+            <div className="absolute bottom-4 left-4 bg-slate-900/90 border border-slate-800/80 rounded-lg p-2.5 flex flex-col space-y-1.5 text-[9px] text-slate-400 font-bold z-[1000] backdrop-blur-sm shadow-xl select-none">
               <div className="flex items-center space-x-1.5">
                 <span className="h-2 w-2 rounded-full bg-emerald-500"></span> <span>Safe Check-in</span>
               </div>
@@ -800,12 +1179,226 @@ export default function Dashboard() {
               </div>
             </div>
             
-            <div className="absolute top-2 left-2 bg-slate-900/90 border border-slate-850 rounded-lg py-1 px-2.5 text-[10px] text-slate-300 font-mono z-25 flex items-center space-x-1">
+            <div className="absolute top-4 left-4 bg-slate-900/90 border border-slate-850 rounded-lg py-1 px-2.5 text-[10px] text-slate-300 font-mono z-[1000] flex items-center space-x-1 select-none">
               <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-ping"></span>
-              <span>RADAR SWEEP ACTIVE</span>
+              <span>LIVE INTERACTIVE GPS MAP</span>
             </div>
           </div>
+
+          {/* Map click hint */}
+          <div className="mt-2 text-[10px] text-slate-500 italic text-center">
+            💡 Pro-Tip: Click anywhere on the map to register a new resident at those exact coordinates.
+          </div>
         </div>
+
+        {/* Add User Modal Dialog */}
+        {showAddUserModal && clickedCoords && (
+          <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-sm z-[2000] flex items-center justify-center p-4">
+            <div className="glass-panel max-w-sm w-full rounded-2xl p-5 shadow-2xl border border-slate-800/80 space-y-4">
+              <div className="flex justify-between items-center pb-2 border-b border-slate-900">
+                <h3 className="font-bold text-white text-sm tracking-wide">REGISTER COASTAL RESIDENT</h3>
+                <button 
+                  onClick={() => { setShowAddUserModal(false); setClickedCoords(null); }}
+                  className="text-slate-400 hover:text-white text-[11px] font-semibold px-2 py-1 rounded bg-slate-900 border border-slate-800"
+                >
+                  Cancel
+                </button>
+              </div>
+
+              <form onSubmit={handleAddNewUser} className="space-y-3">
+                <div className="space-y-1">
+                  <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Coordinates</label>
+                  <input
+                    type="text"
+                    readOnly
+                    value={`${clickedCoords.lat}, ${clickedCoords.lng}`}
+                    className="w-full bg-slate-950/40 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-500 focus:outline-none"
+                  />
+                </div>
+                
+                <div className="space-y-1">
+                  <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Resident Name</label>
+                  <input
+                    type="text"
+                    required
+                    value={newUserName}
+                    onChange={(e) => setNewUserName(e.target.value)}
+                    placeholder="e.g. Priyanjali Patnaik"
+                    className="w-full bg-slate-950/70 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-rose-500"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Phone Number</label>
+                  <input
+                    type="text"
+                    required
+                    value={newUserPhone}
+                    onChange={(e) => setNewUserPhone(e.target.value)}
+                    placeholder="e.g. +91XXXXXXXXXX"
+                    className="w-full bg-slate-950/70 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Language</label>
+                  <select
+                    value={newUserLang}
+                    onChange={(e) => setNewUserLang(e.target.value)}
+                    className="w-full bg-slate-950/70 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none"
+                  >
+                    <option value="Hindi">Hindi</option>
+                    <option value="Bengali">Bengali</option>
+                    <option value="Tamil">Tamil</option>
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Location Label</label>
+                  <input
+                    type="text"
+                    value={newUserLocName}
+                    onChange={(e) => setNewUserLocName(e.target.value)}
+                    placeholder="e.g. Puri Shoreline, Odisha"
+                    className="w-full bg-slate-950/70 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-2.5 mt-2 rounded-lg bg-rose-500 hover:bg-rose-600 text-white font-bold text-xs tracking-wider transition"
+                >
+                  REGISTER RESIDENT
+                </button>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* Picking location banner */}
+        {isPickingLocation && (
+          <div className="fixed top-20 left-1/2 transform -translate-x-1/2 z-[2000] bg-rose-600/90 border border-rose-500 rounded-xl py-3 px-6 shadow-2xl backdrop-blur-md flex items-center space-x-3 text-white font-semibold text-xs tracking-wider animate-bounce select-none">
+            <span className="h-2.5 w-2.5 rounded-full bg-white animate-ping"></span>
+            <span>DISASTER LOCATION PICKER ACTIVE: CLICK ON THE MAP TO SET COORDINATES</span>
+            <button 
+              onClick={() => setIsPickingLocation(false)}
+              className="px-2 py-0.5 rounded bg-black/30 hover:bg-black/50 text-[10px] transition"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+
+        {/* Add Preset Disaster Modal */}
+        {showAddDisasterModal && (
+          <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-sm z-[2000] flex items-center justify-center p-4">
+            <div className="glass-panel max-w-sm w-full rounded-2xl p-5 shadow-2xl border border-slate-800/80 space-y-4">
+              <div className="flex justify-between items-center pb-2 border-b border-slate-900">
+                <h3 className="font-bold text-white text-sm tracking-wide">CREATE CUSTOM DISASTER WARNING</h3>
+                <button 
+                  onClick={() => setShowAddDisasterModal(false)}
+                  className="text-slate-400 hover:text-white text-[11px] font-semibold px-2 py-1 rounded bg-slate-900 border border-slate-800"
+                >
+                  Cancel
+                </button>
+              </div>
+
+              <form onSubmit={handleAddNewDisaster} className="space-y-3">
+                <div className="space-y-1">
+                  <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Short Name (for Chip)</label>
+                  <input
+                    type="text"
+                    required
+                    value={disasterName}
+                    onChange={(e) => setDisasterName(e.target.value)}
+                    placeholder="e.g. Cyclone Amphan"
+                    className="w-full bg-slate-950/70 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-rose-500"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Full Warning Title</label>
+                  <input
+                    type="text"
+                    required
+                    value={disasterTitle}
+                    onChange={(e) => setDisasterTitle(e.target.value)}
+                    placeholder="e.g. Super Cyclone Amphan Warning"
+                    className="w-full bg-slate-950/70 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-rose-500"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Severity</label>
+                  <select
+                    value={disasterSeverity}
+                    onChange={(e) => setDisasterSeverity(e.target.value)}
+                    className="w-full bg-slate-950/70 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none"
+                  >
+                    <option value="CRITICAL">CRITICAL</option>
+                    <option value="WARNING">WARNING</option>
+                    <option value="ADVISORY">ADVISORY</option>
+                  </select>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Latitude</label>
+                    <input
+                      type="number"
+                      step="0.000001"
+                      required
+                      value={disasterLat}
+                      onChange={(e) => setDisasterLat(e.target.value)}
+                      className="w-full bg-slate-950/70 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-rose-500"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Longitude</label>
+                    <input
+                      type="number"
+                      step="0.000001"
+                      required
+                      value={disasterLng}
+                      onChange={(e) => setDisasterLng(e.target.value)}
+                      className="w-full bg-slate-950/70 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-rose-500"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsPickingLocation(true);
+                    setShowAddDisasterModal(false); // temporary hide modal to let user click on map
+                  }}
+                  className="w-full py-1.5 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-[10px] font-bold tracking-wider transition"
+                >
+                  📍 PICK COORDINATES FROM MAP
+                </button>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Warning Description</label>
+                  <textarea
+                    required
+                    value={disasterDesc}
+                    onChange={(e) => setDisasterDesc(e.target.value)}
+                    placeholder="Provide details about the warnings, directions, evacuations..."
+                    className="w-full h-20 bg-slate-950/70 border border-slate-800 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-rose-500/60 transition resize-none leading-normal"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-2.5 mt-2 rounded-lg bg-rose-500 hover:bg-rose-600 text-white font-bold text-xs tracking-wider transition"
+                >
+                  CREATE DISASTER PRESET
+                </button>
+              </form>
+            </div>
+          </div>
+        )}
+
 
         {/* User database live status table/grid */}
         <div className="glass-panel rounded-2xl p-5 shadow-2xl flex-1 flex flex-col">

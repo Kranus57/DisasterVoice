@@ -169,6 +169,47 @@ app.get('/api/users', (req, res) => {
   res.json(users);
 });
 
+// Route to add or update a user (resident) with GPS coordinates
+app.post('/api/users', (req, res) => {
+  const { id, name, phone, language, location, lat, lng } = req.body;
+  if (!name || !phone || !language || !location || lat === undefined || lng === undefined) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  let user = users.find(u => u.id === id || u.phone === phone);
+  if (user) {
+    // Update existing
+    user.name = name;
+    user.phone = phone;
+    user.language = language;
+    user.location = location;
+    user.lat = Number(lat);
+    user.lng = Number(lng);
+    user.updatedAt = new Date().toISOString();
+  } else {
+    // Create new
+    const newId = id || `user_${Date.now()}`;
+    user = {
+      id: newId,
+      name,
+      phone,
+      language,
+      location,
+      lat: Number(lat),
+      lng: Number(lng),
+      status: 'Pending',
+      channel: 'WhatsApp',
+      lastMessage: null,
+      updatedAt: new Date().toISOString()
+    };
+    users.push(user);
+  }
+
+  io.emit('user_update', user);
+  io.emit('initial_state', { users });
+  res.json({ success: true, user });
+});
+
 // Route to manually simulate alert trigger
 app.post('/api/simulate-trigger', (req, res) => {
   const { title, description, severity, languages, channels } = req.body;
